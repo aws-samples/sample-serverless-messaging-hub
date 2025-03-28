@@ -1,0 +1,41 @@
+environment: "sandbox"
+account: "/sandbox/account"
+region: "us-east-1"
+databases:
+  dynamo:
+    messaging: "messaging-templates"
+eventBus:
+  rules:
+    messages:
+      source: "eventbridge.messages"
+      detailType:
+        email: "email"
+        sms: "sms"
+buckets:
+  htmlStorage: "html-storage"
+sqs:
+  mailing:
+    email:
+      name: "cross-email"
+      visibilityTimeout: 10
+    sms:
+      name: "cross-sms"
+      visibilityTimeout: 10
+code:
+  lambda:
+    source:
+      cross:
+        email:
+          id: "cross-email"
+          functionName: "cross-email"
+          description: "AWS - Cross Email"
+          entry: "src/aws-lambdas/src/controllers/SendEmailController.ts"
+          timeout: 10
+          memory: 128
+        sms:
+          id: "cross-sms"
+          functionName: "cross-sms"
+          description: "AWS - Cross SMS"
+          entry: "src/aws-lambdas/src/controllers/SendSmsController.ts"
+          timeout: 10
+          memory: 128

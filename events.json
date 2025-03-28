@@ -1,0 +1,19 @@
+{
+  "version": "0",
+  "id": "b69519e8-7c07-9992-5726-95683e85dd7e",
+  "detail-type": "email",
+  "source": "eventbridge.messages",
+  "account": "590183859692",
+  "time": "2024-12-15T03:48:19Z",
+  "region": "us-east-1",
+  "resources": [],
+  "detail": {
+    "language": "en",
+    "product": "productA",
+    "feature": "welcomeMessage",
+    "channel": "email",
+    "mail": "hdomingy@gmail.com",
+    "name": "Hugo",
+    "lastName": "Dominguez"
+  }
+}
