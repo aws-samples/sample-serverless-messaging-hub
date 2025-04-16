@@ -8,7 +8,7 @@ This project implements messaging infrastructure using AWS CDK with TypeScript. 
 
 ## 🔧 Prerequisites
 
-- Node.js (v14.x or later)
+- Node.js (v18.x or later)
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI installed (`npm install -g aws-cdk`)
 - TypeScript knowledge
