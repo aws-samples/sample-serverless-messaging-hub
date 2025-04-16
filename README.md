@@ -52,13 +52,7 @@ Note: Replace `<environment>` with your target environment (e.g., sandbox, dev, 
 
 ## 📦 Deployment
 
-1. Make sure your AWS credentials are configured
-2. Deploy to your desired environment:
-```bash
-cdk deploy -c env=sandbox
-```
-
-## 🌍 Environment Context
+Make sure your AWS credentials are configured
 
 This project uses CDK context to manage different environments. All CDK commands require the environment context parameter:
 
@@ -89,6 +83,7 @@ When you need to:
 * When working with new features that require a specific version of the bootstrap
 
 At the successful completion of the execution of the command, we can validate the CdkToolkit stack in the console of the AWS service called CloudFormation
+
 ![cloudformation.jpg.png](lib/utils/images/cloudformation.jpg.png)
 
 2. To synthesize the CDK template, which is the process of converting the CDK code into a CloudFormation template, we will use the following command:
@@ -136,6 +131,7 @@ Verification of deployment
 Once the deployment is complete, we can verify the implementation:
 
 Access the AWS console and verify the creation of resources:
+
 ![stack.jpg.png](lib/utils/images/stack.jpg.png)
 
 ## 🏗️ Architecture
