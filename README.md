@@ -155,6 +155,28 @@ Amazon Simple Email Service (SES) handles reliable email delivery, while Amazon 
 
 Amazon DynamoDB stores critical metadata, such as template configurations, user preferences, and delivery logs, allowing fast and consistent access to this information.
 
+## Clean up
+```bash
+cdk destroy -c env=sandbox
+```
+During the execution of the cdk destroy command:
+
+1. CDK will show a summary of all the resources that will be deleted
+2. You will request confirmation before proceeding with the deletion.
+3. It will execute the deletion in the correct order, respecting the dependencies between resources
+4. It will provide real-time feedback on the progress of the elimination
+
+Post-cleaning check
+
+After running cdk destroy, it is recommended to verify:
+
+1. The AWS CloudFormation console to confirm that the stack has been completely deleted
+2. That there are no orphan resources left in the following services:
+
+* CloudWatch Logs (log groups can persist)
+* S3 (verify that the buckets have been emptied and deleted)
+* DynamoDB (confirm the removal of the tables)
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
