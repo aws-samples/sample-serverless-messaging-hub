@@ -21,6 +21,11 @@ This project implements messaging infrastructure using AWS CDK with TypeScript. 
 npm install
 ```
 
+With the previously made configurations, we proceed to check the installation and version of the AWS CDK Toolkit, with the following command:
+```bash
+cdk --version
+```
+
 ## 📁 Project Structure
 
 ```
