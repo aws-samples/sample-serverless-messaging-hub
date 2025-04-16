@@ -70,9 +70,77 @@ cdk diff -c env=sandbox      # Check changes in sandbox environment
 cdk synth -c env=sandbox     # Synthesize template for sandbox environment
 ```
 
+1. CDK Bootstrap, bootstrapping is a unique configuration process per region and AWS account, we will use the following command (This process is only required for accounts that do not have a bootstrap already deployed):
+
+```bash
+cdk bootstrap -c env=sandbox
+```
+Purpose:
+
+* Create a special S3 bucket that CDK uses to store assets
+* Configure IAM roles required for deployment
+* Establishes the base infrastructure that CDK needs for deployments
+* Create a CloudFormation stack called “CdkToolkit”
+
+When you need to:
+
+* First time using CDK in an account/region
+* When bootstrap policies are updated
+* When working with new features that require a specific version of the bootstrap
+
+At the successful completion of the execution of the command, we can validate the CdkToolkit stack in the console of the AWS service called CloudFormation
+![cloudformation.jpg.png](lib/utils/images/cloudformation.jpg.png)
+
+2. To synthesize the CDK template, which is the process of converting the CDK code into a CloudFormation template, we will use the following command:
+```bash
+cdk synth -c env=sandbox
+```
+Purpose:
+
+* Validates the configuration and structure of the CDK code
+* Resolve all references and dependencies between resources
+* Generate a CloudFormation template in YAML/JSON format
+* Allows you to review exactly what resources will be created before deployment
+* Detect configuration errors early
+* Facilitates infrastructure versioning
+
+Output:
+
+* Generate the cdk.out/ [stack-name] .template.json file
+* Create required manifests and asset files
+* Show the CloudFormation template in the console
+
+3. Deployment, carry out the effective deployment of the infrastructure on AWS, we will use the following command:
+```bash
+cdk deploy -c env=sandbox
+```
+Purpose:
+
+* Run synth internally
+* Upload the necessary assets to the bootstrap bucket
+* Create or update the stack in CloudFormation
+* Show progress in real time
+* Handle automatic rollbacks in case of error
+
+Deployment monitoring:
+
+* Show CloudFormation events in real time
+* Indicates resource changes
+* Provides information on defined outputs
+* Report errors and rollback states
+
+This sequence of commands (bootstrap → synth → deploy) ensures a controlled and repeatable deployment of the infrastructure, allowing early detection of errors and facilitating continuous maintenance of the solution.
+
+Verification of deployment
+
+Once the deployment is complete, we can verify the implementation:
+
+Access the AWS console and verify the creation of resources:
+![stack.jpg.png](lib/utils/images/stack.jpg.png)
+
 ## 🏗️ Architecture
 
-![architecture.jpg](lib/utils/architecture.jpg)
+![architecture.jpg](lib/utils/images/architecture.jpg)
 
 Our architecture is built on Amazon EventBridge as the central orchestration component, acting as an enterprise event bus. This service enables us to implement a truly event-driven architecture, where each message can trigger specific workflows based on its nature and destination.
 
