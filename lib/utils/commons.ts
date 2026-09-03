@@ -1,23 +1,18 @@
-import {SSMClient, GetParameterCommand} from "@aws-sdk/client-ssm";
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
-export interface SSMGetParameterInput {
-    Name: string;
-}
+const ssmClient = new SSMClient({});
 
-export async function getParameterValue(parameterName: string): Promise<string | undefined> {
-    const client = new SSMClient({region: process.env.AWS_REGION});
-
-    try {
-        const input: SSMGetParameterInput = {
-            Name: parameterName
-        };
-
-        const command = new GetParameterCommand(input);
-        const response = await client.send(command);
-
-        return response.Parameter?.Value;
-    } catch (error) {
-        console.error('Error retrieving parameter:', error);
-        throw error;
+/**
+ * Retrieves a parameter value from AWS SSM Parameter Store.
+ * Used at synth time to resolve the AWS account ID.
+ */
+export async function getParameterValue(parameterName: string): Promise<string> {
+    const command = new GetParameterCommand({
+        Name: parameterName,
+    });
+    const response = await ssmClient.send(command);
+    if (!response.Parameter?.Value) {
+        throw new Error(`SSM parameter "${parameterName}" not found or has no value`);
     }
+    return response.Parameter.Value;
 }

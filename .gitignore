@@ -1,0 +1,13 @@
+node_modules
+
+# CDK asset staging directory
+cdk.out
+
+# macOS
+.DS_Store
+
+# ─── Test coverage ───
+coverage/
+
+# ─── Logs ───
+*.log

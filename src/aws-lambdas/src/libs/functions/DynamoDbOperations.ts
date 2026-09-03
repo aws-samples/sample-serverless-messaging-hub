@@ -1,35 +1,32 @@
-import { unmarshall } from "@aws-sdk/util-dynamodb";
-import { MessagingTemplateFilter } from "../../utils/UtilTypes";
-import { DynamoDbUtil } from "../../aws/DynamoDb";
-import { Errors } from "../../../layer/commons/ErrorConstant";
-import { Logger } from "@aws-lambda-powertools/logger";
+import { GetItemCommand } from '@aws-sdk/client-dynamodb';
+import { unmarshall } from '@aws-sdk/util-dynamodb';
+import { Logger } from '@aws-lambda-powertools/logger';
+import { dynamoDbClient } from '../../aws/DynamoDb';
+import { MessagingTemplateFilter } from '../../utils/UtilTypes';
 
-const serviceName = "DynamoDbOperations";
-const logger = new Logger({ serviceName: serviceName });
+const logger = new Logger({ serviceName: 'DynamoDbOperations' });
+
 export async function getConfigurationItem(messagingFilter: MessagingTemplateFilter) {
-    const dynamoDbUtil = new DynamoDbUtil();
-
     const { product, channel, feature, language } = messagingFilter;
+
     try {
-        const configurationItem = await dynamoDbUtil.getItem({
+        const command = new GetItemCommand({
             TableName: process.env.MESSAGING_TABLE_NAME,
             Key: {
-                product: {
-                    S: product,
-                },
-                filterKey: {
-                    S: `${channel}#${feature}#${language}`,
-                },
+                product: { S: product },
+                filterKey: { S: `${channel}#${feature}#${language}` },
             },
         });
 
-        if (!configurationItem?.Item) {
-            throw new Error("No template found for the given product, channel, feature and language");
+        const result = await dynamoDbClient.send(command);
+
+        if (!result?.Item) {
+            throw new Error(`No template found for ${product}/${channel}/${feature}/${language}`);
         }
 
-        return unmarshall(configurationItem.Item);
+        return unmarshall(result.Item);
     } catch (error) {
-        logger.error(Errors.DATABASE.message, { error });
+        logger.error('Failed to get configuration item', { error, messagingFilter });
         throw error;
     }
 }

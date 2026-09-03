@@ -1,6 +1,6 @@
-import {getConfigurationItem} from "../libs/functions/DynamoDbOperations";
-import {getTemplate} from "../libs/functions/S3Operations";
-import {MessagingTemplateFilter} from "./UtilTypes";
+import { getConfigurationItem } from '../libs/functions/DynamoDbOperations';
+import { getTemplate } from '../libs/functions/S3Operations';
+import { MessagingTemplateFilter } from './UtilTypes';
 
 export interface SESTemplateParams {
     toAddresses: string | string[];
@@ -9,55 +9,62 @@ export interface SESTemplateParams {
     htmlMessage: string;
     charset?: string;
     source: string;
+    configurationSetName?: string;
+    tags?: { name: string; value: string }[];
 }
 
 export interface EmailConfig {
-    configuration: any;
+    configuration: Record<string, string>;
     template: string;
 }
 
 export class EmailConfigService {
-    private static readonly TEMPLATE_PATH = (filter: MessagingTemplateFilter) =>
-        `${filter.product}/${filter.language}/${filter.feature}.html`;
-
+    /**
+     * Loads the email configuration for a given message.
+     *
+     * The S3 object key for the HTML body is taken from the DynamoDB item's
+     * `templatePath` attribute (single source of truth), NOT derived from a
+     * naming convention. This keeps the storage layout flexible and portable:
+     * a template can live at any key as long as the DB row points to it.
+     */
     public static async getEmailConfig(messagingFilter: MessagingTemplateFilter): Promise<EmailConfig> {
-        try {
-            const [configuration, template] = await Promise.all([
-                getConfigurationItem(messagingFilter),
-                getTemplate(this.TEMPLATE_PATH(messagingFilter))
-            ]);
+        const configuration = await getConfigurationItem(messagingFilter);
 
-            return { configuration, template };
-        } catch (error) {
-            throw new Error(`Failed to get email configuration: 
-            ${error instanceof Error ? error.message : 'Unknown error'}`);
+        const templatePath = configuration.templatePath;
+        if (!templatePath || typeof templatePath !== 'string') {
+            const { product, channel, feature, language } = messagingFilter;
+            throw new Error(
+                `Configuration for ${product}/${channel}/${feature}/${language} is missing a valid "templatePath" attribute`,
+            );
         }
+
+        const template = await getTemplate(templatePath);
+
+        return { configuration, template };
     }
 }
 
-export const createSESTemplate = ({
-                                      toAddresses,
-                                      subject,
-                                      configurationSubject,
-                                      htmlMessage,
-                                      charset = 'UTF-8',
-                                      source
-                                  }: SESTemplateParams) => {
-
+export function createSESTemplate({
+    toAddresses,
+    subject,
+    configurationSubject,
+    htmlMessage,
+    charset = 'UTF-8',
+    source,
+    configurationSetName,
+    tags,
+}: SESTemplateParams) {
     if (!toAddresses) throw new Error('toAddresses is required');
     if (!htmlMessage) throw new Error('htmlMessage is required');
     if (!source) throw new Error('source is required');
 
     return {
         Destination: {
-            ToAddresses: [`${toAddresses}`],
+            ToAddresses: Array.isArray(toAddresses) ? toAddresses : [toAddresses],
         },
         Message: {
             Body: {
-                Html: {
-                    Charset: charset,
-                    Data: htmlMessage,
-                },
+                Html: { Charset: charset, Data: htmlMessage },
             },
             Subject: {
                 Charset: charset,
@@ -65,5 +72,9 @@ export const createSESTemplate = ({
             },
         },
         Source: source,
-    }
-};
+        ...(configurationSetName ? { ConfigurationSetName: configurationSetName } : {}),
+        ...(tags && tags.length > 0
+            ? { Tags: tags.map((t) => ({ Name: t.name, Value: t.value })) }
+            : {}),
+    };
+}

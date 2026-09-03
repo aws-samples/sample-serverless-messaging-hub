@@ -1,4 +1,4 @@
-import { CHANNEL_TYPES } from "../../layer/commons/UtilsConstans";
+import { CHANNEL_TYPES } from '../common/UtilsConstants';
 
 export interface MessagingTemplateFilter {
     product: string;

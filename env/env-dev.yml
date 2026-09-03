@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Portable configuration — change `organization` and `appName` to rebrand the
+# entire stack. Every resource is named `${organization}-${environment}-${appName}-...`
+# ─────────────────────────────────────────────────────────────────────────────
+organization: "acme"          # your org/company short name (used as resource prefix)
+appName: "messaging-hub"      # this application's name
+environment: "dev"             # must match the `-c env=` value used to deploy
+# account: "/custom/ssm/path"  # optional override; defaults to /${appName}/${environment}/account
+region: "us-east-1"            # fallback only — the deployed region comes from primary/secondaryRegion
+primaryRegion: "us-east-1"
+secondaryRegion: "us-west-2"   # multi-region enabled (Global Endpoint + Global Tables)
+retainData: false              # dev: DESTROY + no Object Lock (safe iteration). prod/qa: true (RETAIN + WORM)
+tags:
+  product: "Infrastructure"    # value of the `Product` tag applied to every stack
+  owner: "CloudTeam"           # value of the `Owner` tag — set to your team
+databases:
+  dynamodb:
+    messagingTemplates: "messaging-templates"
+    idempotency: "idempotency"
+eventBus:
+  rules:
+    messages:
+      source: "eventbridge.messages"
+      detailType:
+        email: "email"
+        sms: "sms"
+buckets:
+  htmlStorage: "html-storage"
+  audit: "audit"
+monitoring:
+  alarmEmail: "hdomingy@amazon.com"   # REQUIRED: alarm recipient (SNS email subscription — must be confirmed from the inbox)
+  alarms:                        # 8 alarms per region (4 types × email/sms)
+    evaluationPeriods: 1         # consecutive breaching periods before firing
+    dlqDepth:
+      threshold: 1               # any message in a DLQ is actionable
+      periodMinutes: 1
+    lambdaErrors:
+      threshold: 1
+      periodMinutes: 5
+    lambdaThrottles:
+      threshold: 1
+      periodMinutes: 5
+    queueAge:
+      threshold: 300             # SECONDS — oldest message age (5 min)
+      periodMinutes: 1
+observability:
+  logRetentionDays: 90           # Lambda log group retention (CloudWatch discrete values only)
+  logLevel: "INFO"               # Powertools: DEBUG | INFO | WARN | ERROR | CRITICAL | SILENT
+  logEvent: true                 # log the full event — verbose; consider false in prod
+  tracing: true                  # X-Ray active tracing (drives Tracing.ACTIVE + POWERTOOLS_TRACE_ENABLED)
+failover:                        # only used when secondaryRegion is set
+  latencyThresholdMs: 30000      # ingestion-to-invocation latency that trips the health check
+  periodMinutes: 1
+  evaluationPeriods: 5
+audit:
+  firehoseStream: "audit"
+  worm: false                    # Object Lock (WORM). dev: off — objects must stay deletable
+  wormMode: "GOVERNANCE"         # only when worm=true. GOVERNANCE keeps an erasure path; COMPLIANCE does not
+  objectLockRetentionDays: 365   # WORM retention (when worm=true)
+  glacierTransitionDays: 90      # move to the archive tier after N days
+  glacierStorageClass: "GLACIER" # GLACIER | GLACIER_IR | DEEP_ARCHIVE
+  expirationDays: 0              # delete audit objects after N days. 0 = keep forever
+  bufferSeconds: 300             # Firehose buffering interval
+  bufferSizeMb: 5                # Firehose buffering size
+sms:
+  senderId: ""                # optional; leave empty to omit. Sender ID is NOT supported in some regions (e.g. US/Canada)
+sqs:
+  mailing:
+    email:
+      name: "messaging-email"
+      visibilityTimeout: 30
+    sms:
+      name: "messaging-sms"
+      visibilityTimeout: 30
+  dlq:
+    email:
+      name: "messaging-email-dlq"
+      maxReceiveCount: 3
+      retentionDays: 14
+    sms:
+      name: "messaging-sms-dlq"
+      maxReceiveCount: 3
+      retentionDays: 14
+code:
+  lambda:
+    email:
+      id: "send-email"
+      functionName: "send-email"
+      description: "Messaging Hub — Send Email via SES"
+      entry: "src/aws-lambdas/src/controllers/SendEmailController.ts"
+      timeout: 30
+      memory: 128
+    sms:
+      id: "send-sms"
+      functionName: "send-sms"
+      description: "Messaging Hub — Send SMS via SNS"
+      entry: "src/aws-lambdas/src/controllers/SendSmsController.ts"
+      timeout: 30
+      memory: 128

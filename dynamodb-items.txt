@@ -1,4 +1,20 @@
-aws dynamodb put-item --table-name aws-sandbox-serverless-messaging-templates --item '{ "product": {"S": "productA"}, "filterKey": {"S": "email#welcomeMessage#en"}, "source": {"S": "*******@tudominio.com"}, "subject": {"S": "Welcome message"}, "template": {"S": "" } }'
-aws dynamodb put-item --table-name aws-sandbox-serverless-messaging-templates --item '{ "product": {"S": "productA"}, "filterKey": {"S": "email#welcomeMessage#es"}, "source": {"S": "*******@tudominio.com"}, "subject": {"S": "Mensaje de bienvenida"}, "template": {"S": "" } }'
-aws dynamodb put-item --table-name aws-sandbox-serverless-messaging-templates --item '{ "product": {"S": "productA"}, "filterKey": {"S": "sms#welcomeMessage#en"}, "subject": {"S": "Welcome message"}, "template": {"S": "{{name}}, Welcome to AWS Peru Cloud Academy! We'\''re thrilled that you'\''ve successfully created your account."} }'
-aws dynamodb put-item --table-name aws-sandbox-serverless-messaging-templates --item '{ "product": {"S": "productA"}, "filterKey": {"S": "sms#welcomeMessage#es"}, "subject": {"S": "Mensaje de bienvenida"}, "template": {"S": "{{name}}, ¡Bienvenido/a a AWS Perú Cloud Academy! Estamos encantados de que hayas creado tu cuenta con éxito."} }'
+# ─────────────────────────────────────────────────────────────────────────────
+# Seed data for the messaging-templates DynamoDB table (DEMO — 2 records).
+#
+# Table name follows the prefix `${organization}-${environment}-${appName}`:
+#   acme-dev-messaging-hub-messaging-templates
+# Replace the table name and the "source" address with your verified SES sender.
+#
+# Keys:
+#   product  (partition key)  e.g. "demo"
+#   filterKey (sort key)      "<channel>#<feature>#<language>"
+#
+# For EMAIL rows the HTML body lives in S3; DynamoDB only stores metadata and the
+# S3 object key in `templatePath`. Leave `template` empty for email.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Welcome email — English
+aws dynamodb put-item --table-name acme-dev-messaging-hub-messaging-templates --item '{ "product": {"S": "demo"}, "filterKey": {"S": "email#welcome#en"}, "channel": {"S": "email"}, "language": {"S": "en"}, "source": {"S": "Messaging Hub <hdomingy@amazon.com>"}, "subject": {"S": "Welcome to Messaging Hub"}, "templatePath": {"S": "demo/en/welcome.html"}, "template": {"S": ""}, "idempotencyTtlSeconds": {"N": "86400"} }'
+
+# Welcome email — Spanish
+aws dynamodb put-item --table-name acme-dev-messaging-hub-messaging-templates --item '{ "product": {"S": "demo"}, "filterKey": {"S": "email#welcome#es"}, "channel": {"S": "email"}, "language": {"S": "es"}, "source": {"S": "Messaging Hub <hdomingy@amazon.com>"}, "subject": {"S": "Bienvenido a Messaging Hub"}, "templatePath": {"S": "demo/es/welcome.html"}, "template": {"S": ""}, "idempotencyTtlSeconds": {"N": "86400"} }'

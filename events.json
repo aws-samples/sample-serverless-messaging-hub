@@ -4,16 +4,17 @@
   "detail-type": "email",
   "source": "eventbridge.messages",
   "account": "111111111111",
-  "time": "2024-12-15T03:48:19Z",
+  "time": "2025-05-04T03:48:19Z",
   "region": "us-east-1",
   "resources": [],
   "detail": {
-    "language": "en",
-    "product": "productA",
-    "feature": "welcomeMessage",
+    "idempotencyKey": "demo-welcome-jane-0001",
+    "language": "es",
+    "product": "demo",
+    "feature": "welcome",
     "channel": "email",
-    "mail": "*******@tudominio.com",
-    "name": "Hugo",
-    "lastName": "Dominguez"
+    "mail": "recipient@example.com",
+    "name": "Jane",
+    "lastName": "Doe"
   }
 }
