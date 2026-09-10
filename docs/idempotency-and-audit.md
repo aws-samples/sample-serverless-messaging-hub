@@ -51,7 +51,11 @@ not derive it: producing the event owns generating it.
   **not** create infrastructure: it only manages the items inside it.
 - Schema expected by Powertools (names configurable):
   - PK: `id` (holds the `idempotencyKey`)
-  - TTL enabled on `expiration`
+  - `expiration` — the dedup window. TTL is enabled on it **single-region only**; the
+    multi-region table is MRSC, which does not support TTL (the window is still enforced by
+    the conditional write — see below)
+  - `in_progress_expiration` — orphaned-lock recovery; only written when the Lambda context
+    is registered
   - `status` (`INPROGRESS` / `COMPLETED`) managed by Powertools
 - **Separate** table from `templates` (different access pattern and lifecycle).
 
@@ -66,24 +70,148 @@ phases:
 3. `COMPLETED` (with the template TTL).
 4. If the send fails → the record is released and the message returns to SQS to retry.
 
+### Lambda context is required (`in_progress_expiry`)
+
+The guard wraps an **isolated operation**, not the handler. In that shape Powertools cannot
+discover the Lambda context by itself, so `runOnce` receives it explicitly and calls
+`config.registerLambdaContext(context)`.
+
+This is not cosmetic. The context is what lets Powertools write the in-progress expiry
+attribute — stored as **`in_progress_expiration`** on the item, referenced as
+`#in_progress_expiry` inside the expression — which in turn is what makes the third branch of
+the conditional write reachable:
+
+```
+attribute_not_exists(#id)                       ← first time
+OR #expiry < :now                               ← dedup window elapsed
+OR (#status = :inprogress
+    AND attribute_exists(#in_progress_expiry)   ← unreachable without the context
+    AND #in_progress_expiry < :now_in_millis)
+```
+
+To confirm it is on, scan the idempotency table and check that items carry
+`in_progress_expiration` alongside `id`, `status` and `expiration`.
+
+That third branch is the only way to reclaim an **orphaned lock**. Without it, a function
+killed *without throwing* (timeout, OOM, `Runtime.ExitError`) leaves the key `INPROGRESS`
+for the full dedup window: every SQS redelivery raises `IdempotencyAlreadyInProgressError`,
+the message reaches the DLQ within minutes and is **never sent**, with no recovery for up to
+a day. If the code throws instead, Powertools releases the record and the retry succeeds —
+the gap is specifically silent runtime death.
+
+If you ever see `Could not determine remaining time left. Did you call registerLambdaContext
+on IdempotencyConfig?` in the logs, this protection is off.
+
 ### Per-template TTL (default 1 day)
 
 - The template configuration item (`templates` table) carries `idempotencyTtlSeconds`; if
   absent, **default 86400 (1 day)**.
 - It is read **before** the guard (a side-effect-free read) and used as the `COMPLETED`
   record expiry.
-- DynamoDB **TTL deletes expired records for free** (no delete WCU, no scans): the table
-  does not grow unbounded. The real cost is writes (~2 per message), not storage.
+- The window is enforced by the `#expiry < :now` branch of the **conditional write**, not by
+  DynamoDB TTL. TTL only reclaims storage; correctness does not depend on it. This matters
+  because the multi-region table runs without TTL (see below).
+- Known limitation: the persistence layer is a module-level singleton and Powertools'
+  `configure()` returns early once configured ("Prevent reconfiguration"). The per-template
+  TTL is therefore only applied on the **first** invocation of a warm container; later
+  templates in the same container silently reuse the first TTL. Fixing it requires one
+  persistence-layer instance per distinct TTL.
 
-### Multi-region
+### Multi-region: why the store is MRSC
 
-- In multi-region the table is promoted to a **DynamoDB Global Table** (region-agnostic
-  name). A write in region A replicates to B.
-- **Residual risk (documented):** Global Tables are **eventually consistent** (typical lag
-  <1s). During an overlapping failover, the secondary might not yet see the primary's
-  record → **small chance of a duplicate**. This is inherent to the active-active model;
-  strong cross-region consistency is not viable without sacrificing the availability we
-  seek.
+In multi-region the table is a **DynamoDB global table with Multi-Region Strong Consistency
+(MRSC)**, configured as 2 replicas + 1 witness (`databases.dynamodb.idempotencyWitnessRegion`).
+Under MRSC, item changes are replicated **synchronously** before the write returns, and
+**conditional writes are evaluated against the latest version of the item across Regions**.
+`ConsistentRead` on `getRecord` also becomes authoritative cross-region.
+
+That property is the whole reason for MRSC here, and it is not a theoretical nicety:
+
+> With the EventBridge global endpoint's event replication **enabled**, both Regions process
+> **every** event. On an eventually consistent (MREC) global table, both Lambdas issue
+> `attribute_not_exists(id)` against their **local replica** within the replication lag, both
+> claims succeed, and the message is sent **twice**. This was measured on this system: 4 out
+> of 4 events produced two distinct `providerMessageId` values and two SMTP deliveries, with
+> the two invocations starting ~180 ms apart. It is not a rare failover race — it was the
+> steady-state behaviour on every message.
+
+Note what MRSC does **not** change: both Regions still receive the event and both Lambdas
+still run (that duplication is intentional — it is how AWS recommends validating that the
+secondary Region works). What is eliminated is the duplicated **side effect**.
+
+#### Claim contention: the loser's path
+
+Once MRSC makes the claim authoritative, exactly one Region wins per event and the other has
+to deal with losing. There are three distinct ways that surfaces, and only one of them is
+free:
+
+| Situation | What Powertools raises | Result |
+|-----------|------------------------|--------|
+| Loser arrives **after** the winner flipped the record to `COMPLETED` | `IdempotencyItemAlreadyExistsError` (handled internally) | Clean short-circuit, nothing sent, no error |
+| Loser arrives **while** the winner is still sending (record `INPROGRESS`) | `IdempotencyAlreadyInProgressError` | Retried in-process by `runOnce` |
+| Loser's claim write races the winner's inside MRSC | `IdempotencyPersistenceLayerError` caused by `ReplicatedWriteConflictException` | Retried in-process by `runOnce` |
+
+**Measured:** the middle row is the dominant path. In steady state the secondary Region hit
+`IdempotencyAlreadyInProgressError` on **every** message, while
+`ReplicatedWriteConflictException` never fired once. Left unhandled it failed the invocation,
+forced an SQS redelivery and kept the `*-lambda-errors` alarm in `ALARM` continuously — no
+messages were lost (the redelivery short-circuits cleanly) but the alarm was useless as a
+signal.
+
+`runOnce` therefore retries **both** contention cases in-process: 5 attempts with exponential
+backoff from 300 ms (~4.5 s total). The budget is sized against the *winner's whole
+operation* — it has to finish sending and flip the record to `COMPLETED`, ~2 s here — not
+against replication latency. It fits inside both the 30 s Lambda timeout and the 30 s SQS
+visibility timeout.
+
+The retry is gated on an `operationStarted` flag so it can only ever fire while the guarded
+side effect provably has not run. Powertools uses three distinct wrap messages and only the
+`INPROGRESS` claim failure precedes the send. **Do not relax that guard**: retrying after the
+send would duplicate it, which is the bug this all exists to fix.
+
+Watch for `Idempotency claim held by another execution, retrying` in the logs; the `reason`
+field says which of the two paths fired.
+
+#### ⚠️ Verifying MRSC: an old AWS CLI will lie to you
+
+`aws dynamodb describe-table` **silently omits** `MultiRegionConsistency` and
+`GlobalTableWitnesses` if the CLI's bundled service model predates MRSC (GA June 2025). On AWS
+CLI 2.17.45 those fields are absent from the model entirely, so the command returns nothing for
+them and an MRSC table looks exactly like an eventually consistent one. This cost real
+debugging time during rollout — the table was correct and the tool was blind.
+
+Verify with a recent CLI, the console, or an SDK new enough to know the fields (the Lambda
+bundle's `@aws-sdk/client-dynamodb` does). A correct table reports:
+
+```
+MultiRegionConsistency : STRONG
+GlobalTableWitnesses   : [{"RegionName":"us-east-2","WitnessStatus":"ACTIVE"}]
+```
+
+#### Costs of MRSC (accepted trade-offs)
+
+- **No TTL.** MRSC does not support TTL, so idempotency records are never physically deleted.
+  Correctness is unaffected (see the TTL section above); storage grows — roughly 150 MB per
+  million messages, cents per month. If a cleanup job is ever wanted, note there is no index
+  on `expiration`, so it would require a full `Scan`; add a date-bucket GSI *before* the table
+  grows if that is likely.
+- **Write latency.** Writes and strongly consistent reads need cross-region quorum, adding
+  tens of milliseconds on the send path.
+- **Quorum requirement.** With 3 Regions, quorum is 2 of 3, so a single Region outage still
+  accepts writes. Losing two of the three leaves only eventually consistent reads.
+- **Failback window.** When a Region that was fully offline comes back, **writes and strongly
+  consistent reads in that Region return errors until it catches up**. EventBridge failback is
+  driven by `IngestionToInvocationStartLatency` recovery and is *independent* of DynamoDB
+  catch-up, so events can be routed back to the primary before its replica is ready; those
+  sends fail and retry. Replication covers the message (the secondary still processes it), but
+  expect DLQ noise in the recovering Region. AWS does not publish a catch-up duration, and the
+  SQS retry budget here is only ~90 s (visibility 30 s × `maxReceiveCount` 3) — worth
+  rehearsing in a failover drill rather than assuming.
+- **Single-region deployments keep TTL** and skip MRSC entirely: with one Region there is no
+  cross-region race to protect against.
+
+Setting `idempotencyWitnessRegion` to empty reverts the table to MREC and **re-opens the
+duplicate-send window described above**.
 
 ---
 
@@ -134,9 +262,10 @@ SES Config Set / SNS delivery ──► DELIVERY (JSON) ──► Firehose ─�
 ### Immutability (WORM)
 
 The audit bucket uses **S3 Object Lock (WORM)** for strict non-repudiation: records cannot
-be altered or deleted during the retention period (365 days). It is enabled in **production
-only** (`audit.worm`) in **COMPLIANCE mode** (not even root can override). dev/qa capture
-the same records but the bucket is not immutable.
+be altered or deleted during the retention period (365 days) by ordinary operators. It is
+enabled in **production only** (`audit.worm`), in **GOVERNANCE mode** — see the rationale
+below for why that, and not `COMPLIANCE`. dev/qa capture the same records but the bucket is
+not immutable.
 
 WORM (`audit.worm`) and data retention (`retainData`) are **independent** config axes:
 
@@ -274,13 +403,15 @@ multi-region; **CRR requires versioning** on source and destination.
 | Component | Approx |
 |-----------|--------|
 | DynamoDB dedup writes (~2/msg, on-demand) | ~$2.5/mo |
-| DynamoDB storage (with TTL, steady state) | cents |
+| DynamoDB storage — single-region (TTL prunes it) | cents |
+| DynamoDB storage — multi-region MRSC (**no TTL**, grows ~150 MB/M messages) | cents/mo, cumulative |
 | Firehose (~300 MB/mo) | ~$0.01/mo |
 | S3 audit storage (Parquet/JSON compressed) | cents |
 
-Data growth is **not a cost or performance problem** for DynamoDB (PK access = constant
-latency; TTL caps the size). The value is in **correctness** (no duplicates) and
-**evidence** (non-repudiation).
+Data growth is **not a cost or performance problem** for DynamoDB: access is by partition key,
+so latency stays constant however large the table gets. Single-region, TTL also caps the size;
+under MRSC it does not, so the table grows indefinitely at a few cents a month. The value is in
+**correctness** (no duplicates) and **evidence** (non-repudiation).
 
 ---
 

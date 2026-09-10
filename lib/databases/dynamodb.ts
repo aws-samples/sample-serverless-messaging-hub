@@ -1,6 +1,14 @@
 import { Construct } from 'constructs';
 import { RemovalPolicy } from 'aws-cdk-lib';
-import { AttributeType, Billing, ITable, StreamViewType, Table, TableV2 } from 'aws-cdk-lib/aws-dynamodb';
+import {
+    AttributeType,
+    Billing,
+    ITable,
+    MultiRegionConsistency,
+    StreamViewType,
+    Table,
+    TableV2,
+} from 'aws-cdk-lib/aws-dynamodb';
 import { EnvironmentVariables, StackRole } from '../utils/interfaces/general-interfaces';
 
 /**
@@ -52,14 +60,31 @@ export class DynamoDb extends Construct {
         });
 
         // ─── Idempotency store (Powertools Idempotency) ───
-        // TTL ('expiration') auto-expires records after the per-template window
-        // (default 1 day). As a Global Table it is eventually consistent across
-        // regions (small duplicate window possible during failover — documented).
+        //
+        // Multi-region uses **MRSC** (Multi-Region Strong Consistency): conditional writes
+        // are evaluated against the latest version of the item across Regions. That is the
+        // property the dedup guard depends on. With an eventually consistent global table
+        // both Regions' `attribute_not_exists(id)` claims succeed inside the replication
+        // lag and the message is sent twice — measured, not hypothetical.
+        //
+        // Trade-off: **MRSC does not support TTL**, so records are never physically
+        // deleted. Correctness is unaffected (the dedup window is enforced by the
+        // `#expiry < :now` branch of the conditional write, not by TTL); storage grows
+        // unbounded. Single-region deployments keep TTL, since there is no cross-region
+        // race to protect against.
+        const witnessRegion = replicas ? env.databases.dynamodb.idempotencyWitnessRegion : undefined;
+        const useMrsc = Boolean(witnessRegion);
+
         this.idempotency = new TableV2(this, 'Idempotency', {
             tableName: idempotencyName,
             partitionKey: { name: 'id', type: AttributeType.STRING },
             billing: Billing.onDemand(),
-            timeToLiveAttribute: 'expiration',
+            ...(useMrsc
+                ? {
+                      multiRegionConsistency: MultiRegionConsistency.STRONG,
+                      witnessRegion,
+                  }
+                : { timeToLiveAttribute: 'expiration' }),
             removalPolicy: RemovalPolicy.DESTROY,
             replicas,
         });

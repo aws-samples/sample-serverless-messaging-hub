@@ -20,7 +20,7 @@ const sendEmailLambda = async (event: SQSEvent, context: Context): Promise<void>
     tracer.putAnnotation('awsRequestId', context.awsRequestId);
 
     Validator.validateSQSPayload(event, createRequestPayload(CHANNEL_TYPES.EMAIL));
-    await SendEmailService.send(event);
+    await SendEmailService.send(event, context);
 };
 
 export const handler = middy(sendEmailLambda)

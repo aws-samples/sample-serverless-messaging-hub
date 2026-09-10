@@ -1,6 +1,90 @@
 # End-to-end test evidence — Messaging Hub
 
-Live validation of the deployed **multi-region** stack.
+Live validation of the deployed **multi-region** stack. Runs are recorded newest first; earlier
+runs are kept verbatim, including their resource names, because they are the evidence trail for
+claims made elsewhere in the docs.
+
+| Run | Date (UTC) | Naming prefix | Purpose |
+|-----|-----------|---------------|---------|
+| [Run 2](#run-2--2026-09-09-mrsc-idempotency) | 2026-09-09 | rebranded copy | **Found and fixed a duplicate-send defect**; migrated the idempotency store to MRSC |
+| [Run 1](#run-1--2026-09-02-observability--least-privilege) | 2026-09-02 | `acme-dev-messaging-hub` | Observability + least-privilege certification |
+
+---
+
+# Run 2 — 2026-09-09 (MRSC idempotency)
+
+- **Regions:** primary `us-east-1`, secondary `us-west-2`
+- **Global Endpoint:** `<prefix>-messaging-hub-endpoint`, State `ACTIVE`, replication `ENABLED`
+- **Where it ran:** a **rebranded deployment** of this stack (`organization` changed, which
+  renames every resource — stack names are unaffected, they derive from
+  `${env}-architecture-${appName}`). Resource names below are therefore shown as
+  `<prefix>-…`; the measurements are what matter and transfer unchanged.
+
+## What this run found
+
+Publishing to the **Global Endpoint** (not the bus directly — a bus does not replicate) exposed
+a defect that had been mischaracterised in the docs as a rare failover race:
+
+| Metric | Before | After |
+|--------|-------:|------:|
+| Duplicate sends | **4 / 4 events** | **0 / 4** |
+| Secondary-region invocations per message | 2 (failure + SQS redelivery) | 1 |
+| Secondary-region Lambda errors | 1 per message | **0** |
+| Alarms in `ALARM` | `email-lambda-errors` | none |
+| `in_progress_expiration` on records | absent | present (10/10) |
+
+Each duplicate produced **two distinct `providerMessageId` values and two SMTP `250` deliveries**
+for one `idempotencyKey`, with the two invocations starting ~180 ms apart — inside the Global
+Table replication lag, so both conditional claims succeeded. It was the steady-state behaviour
+on every message, not an edge case.
+
+Two independent defects were fixed: the eventually consistent idempotency store (→ MRSC) and a
+missing `registerLambdaContext` that left `in_progress_expiration` unwritten, making orphaned
+`INPROGRESS` locks unrecoverable for a full day. See
+[`idempotency-and-audit.md`](./idempotency-and-audit.md).
+
+## Migration notes (things that will bite again)
+
+- **CloudFormation refuses to add a witness to an existing GlobalTable:**
+  `"You cannot specify a different GlobalTableWitnesses value for an existing GlobalTable
+  resource"` (`HandlerErrorCode: InvalidRequest`). The rollback was clean. Because the table name
+  is explicit, a same-name replacement is impossible in one deploy, so the migration ran as
+  **two deploys through a temporary table name**, ending on the original name.
+- **An old AWS CLI reports MRSC as absent.** CLI 2.17.45 has zero knowledge of
+  `MultiRegionConsistency` / `GlobalTableWitnesses` in its bundled model and silently drops them,
+  making a correct MRSC table look eventually consistent. This caused a false "CloudFormation
+  ignored MRSC" diagnosis mid-migration. Verify with a recent CLI, the console, or an SDK that
+  knows the fields.
+- **The contention path was not the documented one.** `ReplicatedWriteConflictException` — the
+  exception AWS documents for MRSC write conflicts — **never fired once**. The real path is
+  `IdempotencyAlreadyInProgressError`, on every message, because the losing region finds the
+  winner's `INPROGRESS` record. Both are now retried in-process.
+
+## Final verification
+
+Two events to the Global Endpoint, a personalised `name` in the payload, one per language:
+
+| idempotencyKey | lang | sent by | accepted | delivery | provider response |
+|----------------|------|---------|----------|----------|-------------------|
+| `final-verify-es-1788982686` | es | **us-west-2** | ACCEPTED | DELIVERED | `250 ok: Message 617898892 accepted` |
+| `final-verify-en-1788982686` | en | **us-east-1** | ACCEPTED | DELIVERED | `250 ok: Message 617932069 accepted` |
+
+Exactly one send per key. Note the ES message was sent by the **secondary** region: the guard is
+region-agnostic, whichever region wins the claim performs the send. Both regions reported 2
+invocations / **0 errors**, with 2 in-process contention retries each — resolved without failing
+an invocation. All 8 queues and DLQs empty, no alarms.
+
+**This run also illustrates the known audit blind spot:** each region wrote its acceptance record
+to its *own* regional bucket, so the primary's Athena catalogue shows only the EN message and the
+secondary's only the ES one. Neither view alone would reveal a duplicate if one occurred. Still
+open — see [`compliance.md`](./compliance.md).
+
+---
+
+# Run 1 — 2026-09-02 (observability + least privilege)
+
+> Kept as originally recorded, with the `acme-*` resource names in force at the time. Do not
+> rewrite these to the current prefix: they are the evidence for the claims made about that run.
 
 - **Account:** 590183859692
 - **Regions:** primary `us-east-1`, secondary `us-west-2`

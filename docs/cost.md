@@ -12,8 +12,12 @@ Architecture-level cost estimate for the **multi-region** deployment.
 - **1,000,000 emails / month.**
 - Multi-region: primary + secondary, **event replication ENABLED** (our config), so **both
   regions process** the events.
-- **Idempotency (DynamoDB Global Table) ensures only ONE real SES send**: the secondary
-  region's Lambda short-circuits on the dedup guard and does **not** call SES.
+- **Idempotency ensures only ONE real SES send**: the secondary region's Lambda short-circuits
+  on the dedup guard and does **not** call SES. This holds because the idempotency table is a
+  **MRSC** global table (cross-region strong consistency on the conditional write). On an
+  eventually consistent global table the guard did **not** hold and every message was sent
+  twice — doubling the SES line to ~$200. See
+  [`idempotency-and-audit.md`](./idempotency-and-audit.md#multi-region-why-the-store-is-mrsc).
 - SNS/SMS excluded (country-dependent).
 
 ## Monthly estimate (USD)
@@ -24,7 +28,7 @@ Architecture-level cost estimate for the **multi-region** deployment.
 | Lambda (email) | ~$0.70 | ~$0.45 | ~$1.15 | $0.20/M requests + arm64 compute; secondary runs shorter |
 | SQS | ~$1.50 | ~$1.50 | ~$3.00 | ~3 req/message + polling; $0.40/M |
 | EventBridge | ~$1.00 | ~$1.00 | ~$2.00 | $1/M custom events; replication duplicates |
-| DynamoDB (Global Table) | — | — | ~$8–12 | ~2 writes/msg + replica (rWCU) + reads; storage tiny via TTL |
+| DynamoDB (Global Table) | — | — | ~$8–12 | ~2 writes/msg + replica (rWCU) + reads. `templates` is MREC; `idempotency` is **MRSC** (2 replicas + witness — the witness costs no storage/writes). MRSC has **no TTL**, so idempotency storage grows ~150 MB/M messages instead of self-expiring: cents/month, but unbounded |
 | Firehose (Parquet) | ~$0.30 | ~$0 | ~$0.30 | $0.029/GB + $0.018/GB conversion; **5 KB/record billing rounding** |
 | S3 audit storage | ~$0.50 | ~$0 | ~$0.50 | Parquet (acceptance) + plain JSON (ses-events); WORM prod only |
 | Glue Data Catalog | — | — | ~$0 | within free tier at this volume |
@@ -57,9 +61,11 @@ scales with usage; turn off the traffic and you pay ~$2/month.
 - **Multi-region overhead** (vs single region) is only ~**$15–20/mo**: duplicated
   compute / SQS / logs / X-Ray + event replication + Global Table + health check. **SES
   does not change** (still 1M sends thanks to idempotency).
-- **Idempotency pays for its infrastructure:** without it, with replication enabled you
-  would send **2M emails → ~$200 SES**. Dedup saves ~$100/mo and prevents duplicate
-  messages to the user.
+- **Idempotency pays for its infrastructure:** without an *effective* guard, with replication
+  enabled you send **2M emails → ~$200 SES**. Working dedup saves ~$100/mo and prevents
+  duplicate messages to the user. "Effective" is load-bearing: the guard only delivers this
+  saving because the idempotency store is **MRSC**. Measured on the eventually consistent
+  configuration, the dedup did not hold and the SES line was the full ~$200.
 
 ## Cost levers
 
@@ -74,8 +80,11 @@ scales with usage; turn off the traffic and you pay ~$2/month.
    below the CloudWatch Logs line shown.
 3. **Event replication**: disabling it leaves the secondary as *cold standby* (ingestion
    only), saving ~$15/mo of duplicated compute/logs/X-Ray — **but you lose automatic
-   recovery after failover** and the "warm" validation of the secondary region. Resilience
-   vs cost trade-off.
+   recovery after failover** and the "warm" validation of the secondary region. Concretely,
+   AWS requires replication for automatic failback: without it you must **manually reset the
+   Route 53 health check** before events return to the primary. Resilience vs cost trade-off,
+   and the reason this system keeps replication on and fixes the duplicate at the data layer
+   (MRSC) instead of turning replication off.
 4. **Athena**: not a fixed cost — $5/TB **scanned**. With Parquet + partition projection,
    queries scan very little.
 

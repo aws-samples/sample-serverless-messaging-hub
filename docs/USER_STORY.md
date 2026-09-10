@@ -146,11 +146,20 @@ Y el tracing X-Ray está activo cuando "observability.tracing" es true, de modo 
 ### CA-11 — Idempotencia (sin envíos duplicados)
 ```
 Dado un evento con un "idempotencyKey" (obligatorio, [A-Za-z0-9_-], máx 256)
-Cuando llega un duplicado dentro de la ventana TTL (reintento, replay o failover)
+Cuando llega un duplicado dentro de la ventana de dedup (reintento, replay, o
+     procesamiento simultáneo en ambas regiones por la replicación del Global Endpoint)
 Entonces el envío se ejecuta UNA sola vez (guard INPROGRESS→COMPLETED con Powertools)
-Y el TTL se toma de la plantilla ("idempotencyTtlSeconds", default 1 día)
+Y la ventana se toma de la plantilla ("idempotencyTtlSeconds", default 1 día) y la impone
+     la escritura condicional, no el TTL de DynamoDB
+Y en multi-región la tabla es MRSC, de modo que la escritura condicional se evalúa contra
+     la última versión del ítem entre regiones (sin esto el guard NO se sostiene)
+Y la región que pierde el claim reintenta en proceso y no falla la invocación
+Y un lock abandonado (timeout/OOM sin excepción) se libera por "in_progress_expiration",
+     que exige registrar el Context de Lambda en la IdempotencyConfig
 Y un evento sin "idempotencyKey" válido falla la validación y va a la DLQ
 ```
+> Verificado en vivo el 2026-09-09: con la tabla en consistencia eventual se enviaba **dos
+> veces en el 100% de los mensajes**; con MRSC, 0 duplicados. Evidencia en `e2e-evidence.md`.
 
 ### CA-12 — Auditoría y no repudio
 ```
@@ -158,7 +167,8 @@ Dado un envío exitoso
 Entonces se registra la ACEPTACIÓN (providerMessageId, destinatario hasheado) en Parquet
 Y los eventos de SES (send/delivery/bounce/complaint/reject) se archivan en JSON crudo
      (JSON Lines sin comprimir) vía Configuration Set, correlacionados por el tag "idempotencyKey"
-Y en PRODUCCIÓN el bucket de auditoría es inmutable (Object Lock WORM, modo COMPLIANCE);
+Y en PRODUCCIÓN el bucket de auditoría es inmutable (Object Lock WORM) en modo GOVERNANCE,
+     que conserva una vía break-glass para un derecho de supresión ("audit.wormMode");
      en dev/qa se capturan los mismos registros sin inmutabilidad
 Y todo es consultable con Athena
 Y el archivado es best-effort (nunca provoca un reenvío)
@@ -168,12 +178,20 @@ Y el archivado es best-effort (nunca provoca un reenvío)
 ```
 Dado "secondaryRegion" configurado en el YAML
 Cuando se despliega el stack a ambas regiones
-Entonces existe un EventBridge Global Endpoint con replicación de eventos
-Y las tablas DynamoDB son Global Tables (réplica en la secundaria)
+Entonces existe un EventBridge Global Endpoint con replicación de eventos ACTIVADA,
+     de modo que AMBAS regiones procesan cada evento (recomendación de AWS: mantiene
+     caliente la secundaria y es requisito para el failback automático)
+Y la tabla de plantillas es una Global Table de consistencia eventual (lectura mayoritaria)
+Y la tabla de idempotencia es una Global Table MRSC (2 réplicas + witness), porque es la
+     que decide efectos secundarios y necesita consistencia fuerte entre regiones
 Y una alarma de IngestionToInvocationStartLatency (>30s durante 5 min) vía Route 53 health check
      dispara el failover a la región secundaria
-Y con "secondaryRegion" vacío el comportamiento es single-región (sin cambios)
+Y con "secondaryRegion" vacío el comportamiento es single-región (sin MRSC y con TTL,
+     porque no hay carrera entre regiones de la que protegerse)
 ```
+> **Ojo al activar multi-región en un entorno nuevo:** hay que definir
+> `databases.dynamodb.idempotencyWitnessRegion` en el YAML. Sin él la tabla queda en
+> consistencia eventual y reaparecen los envíos duplicados. Nada lo impide automáticamente.
 
 > Estado de la configuración commiteada: multi-región está habilitado en **dev**
 > (`secondaryRegion: us-west-2`); qa y prod están en single-región. Es un eje opt-in
@@ -191,8 +209,8 @@ Y con "secondaryRegion" vacío el comportamiento es single-región (sin cambios)
 | **Observabilidad** | Logging estructurado (Powertools `Logger`) en un Log Group **gestionado por CloudFormation** por función, con retención de 3 meses; tracing con Powertools `Tracer` + **X-Ray active tracing**; alarmas + SNS. |
 | **Portabilidad** | Sin branding en código; toda la configuración por entorno en YAML (incluidos los valores de tags); account ID resuelto desde SSM con ruta derivada de `appName`. |
 | **Resiliencia** | DLQ por canal; visibility timeout alineado al timeout del Lambda (30s). |
-| **Idempotencia** | `idempotencyKey` obligatorio; dedup con DynamoDB + Powertools, TTL por plantilla (default 1 día). |
-| **No repudio** | Auditoría: aceptación en Parquet + eventos SES en JSON (sin comprimir); Athena. Inmutabilidad WORM (Object Lock, COMPLIANCE) solo en **prod**. |
+| **Idempotencia** | `idempotencyKey` obligatorio; dedup con DynamoDB + Powertools, ventana por plantilla (default 1 día) impuesta por la escritura condicional. En multi-región el store es **MRSC**: es lo que hace que el guard se sostenga cuando ambas regiones procesan el mismo evento. MRSC no soporta TTL, así que los registros no se borran solos (crecimiento acotado en coste, no en volumen). |
+| **No repudio** | Auditoría: aceptación en Parquet + eventos SES en JSON (sin comprimir); Athena. Inmutabilidad WORM (Object Lock) solo en **prod**, en modo **GOVERNANCE** (`audit.wormMode`): decisión deliberada, porque los eventos SES guardan el destinatario en claro y `COMPLIANCE` lo haría indeleble durante toda la retención, incompatible con un derecho de supresión. |
 | **Multi-región** | Opt-in vía `secondaryRegion`: Global Endpoint + Global Tables + failover por health check. |
 | **Costo** | SSE-SQS (sin costo por request de KMS); S3 SSE-S3; DynamoDB on-demand (PAY_PER_REQUEST); retención de logs a 3 meses. Ver `cost.md`. |
 
@@ -227,9 +245,9 @@ Y con "secondaryRegion" vacío el comportamiento es single-región (sin cambios)
 - [x] Monitoreo: SNS + alarmas (DLQ, errores/throttles de Lambda, edad de cola).
 - [x] Log Group gestionado por función con retención de 3 meses + X-Ray active tracing.
 - [x] IAM de mínimo privilegio con SES acotado por ARN de identidad.
-- [x] Idempotencia: `idempotencyKey` + DynamoDB + Powertools con TTL por plantilla.
-- [x] Auditoría/no repudio: aceptación en Parquet + eventos SES en JSON, Athena; bucket WORM (COMPLIANCE) en prod.
-- [x] Multi-región (opt-in): Global Endpoint + Global Tables + failover por health check.
+- [x] Idempotencia: `idempotencyKey` + DynamoDB + Powertools, ventana por plantilla, store **MRSC** en multi-región y recuperación de locks huérfanos.
+- [x] Auditoría/no repudio: aceptación en Parquet + eventos SES en JSON, Athena; bucket WORM en prod (modo por `audit.wormMode`; commiteado: GOVERNANCE).
+- [x] Multi-región (opt-in): Global Endpoint + Global Tables (idempotencia en **MRSC**) + failover por health check.
 - [x] Portabilidad: sin branding en código; `organization`/`appName` por YAML.
 - [x] **Pruebas**: unitarias de Lambda (Zod, plantillas SES, Handlebars, SMS, idempotencia, auditoría) e infra CDK (assertions).
 - [x] **Documentación**: README + `compliance.md`, `idempotency-and-audit.md`, `cost.md`, `e2e-evidence.md`.

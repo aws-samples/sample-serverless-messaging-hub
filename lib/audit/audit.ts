@@ -44,7 +44,8 @@ const ARCHIVE_TIERS: Record<string, StorageClass> = {
  *
  * The S3 bucket always has a lifecycle transition to Glacier. Object Lock (WORM) is
  * conditional: enabled only when `audit.worm` is true (prod), in the mode set by
- * `audit.wormMode` (COMPLIANCE in prod). dev/qa capture identical records in a
+ * `audit.wormMode` (GOVERNANCE in prod, to keep a break-glass erasure path — the SES
+ * events carry the recipient in clear text). dev/qa capture identical records in a
  * mutable bucket. WORM is independent from `retainData` — see the bucket comment.
  */
 export class Audit extends Construct {

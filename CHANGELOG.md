@@ -5,7 +5,7 @@ All notable changes relative to the upstream sample this project started from.
 **Baseline:** [`aws-samples/sample-serverless-messaging-hub`](https://github.com/aws-samples/sample-serverless-messaging-hub)
 at commit `9942f22` (2025-04-16, *"Merge pull request #9 from aws-samples/feat/dynamo-items"*).
 
-Scale of the change: **60 → 74 files**, **1 469 → 3 788 lines of TypeScript**, 0 → 74 automated
+Scale of the change: **60 → 75 files**, **1 469 → 3 788 lines of TypeScript**, 0 → 82 automated
 tests, 0 → 6 design documents.
 
 > ### Licence
@@ -17,6 +17,46 @@ tests, 0 → 6 design documents.
 > `CONTRIBUTING.md` still describes AWS's contribution process (their issue tracker, their
 > security reporting page). Adjust it if this becomes an independently maintained repository;
 > leave `LICENSE` as is.
+
+---
+
+## Fixed
+
+### Multi-region idempotency (two independent defects)
+- **Duplicate sends on every message.** With EventBridge global-endpoint replication enabled,
+  both regions process every event. On the eventually consistent (MREC) global table, both
+  Lambdas' `attribute_not_exists(id)` claims succeeded inside the replication lag and the
+  message was sent **twice** — measured 4/4, with the two invocations starting ~180 ms apart
+  and producing two distinct `providerMessageId` values and two SMTP deliveries. The
+  idempotency table now uses **Multi-Region Strong Consistency (MRSC)** (2 replicas + witness,
+  `databases.dynamodb.idempotencyWitnessRegion`), under which conditional writes evaluate
+  against the latest version of the item across regions. Replication stays **enabled**, so
+  automatic failover *and* failback are preserved — the fix is at the data layer, not by
+  degrading resilience. Cost: MRSC does not support TTL, so idempotency records are no longer
+  physically deleted (the dedup window is enforced by the conditional write, so correctness is
+  unaffected). Single-region deployments keep TTL and skip MRSC.
+- **Orphaned idempotency locks.** `registerLambdaContext` was never called, so
+  `in_progress_expiry` was never written and the conditional-write branch that reclaims an
+  abandoned `INPROGRESS` lock was unreachable. A function killed without throwing (timeout,
+  OOM) held the key for the full dedup window and its messages reached the DLQ **unsent**, with
+  no recovery for up to a day. `runOnce` now takes the Lambda `Context` and registers it.
+- **Claim-contention noise in the losing Region.** Once the guard actually holds, one Region
+  loses every event. Powertools raises `IdempotencyAlreadyInProgressError` when it finds the
+  winner's `INPROGRESS` record, which failed the invocation, forced an SQS redelivery and kept
+  `*-lambda-errors` permanently in `ALARM` — no message loss, but a useless alarm. `runOnce` now
+  retries both contention cases in-process (`IdempotencyAlreadyInProgressError` and
+  `ReplicatedWriteConflictException`): 5 attempts, exponential backoff from 300 ms, sized against
+  the winner's whole operation (~2 s) rather than replication latency. Gated on an
+  `operationStarted` flag so a retry can only ever happen while the guarded side effect provably
+  has not run. Measured after the change: secondary Region at 4 invocations / **0 errors**, down
+  from 2 invocations and 1 error per message.
+  Worth noting which path actually dominates: `IdempotencyAlreadyInProgressError` fired on every
+  message, `ReplicatedWriteConflictException` never once.
+
+### Documentation corrected
+- `idempotency-and-audit.md`, `compliance.md` and `cost.md` described the duplicate-send risk
+  as a *"small residual window during failover"* and assumed the secondary region never sends.
+  Both statements were false in steady state; the cost model's SES line was understated by ~2×.
 
 ---
 
@@ -57,7 +97,7 @@ tests, 0 → 6 design documents.
   and expiry.
 
 ### Testing
-- **74 automated tests** where upstream had none: 41 CDK infrastructure assertions and 33
+- **82 automated tests** where upstream had none: 43 CDK infrastructure assertions and 39
   Lambda unit tests, on Vitest.
 
 ### Documentation

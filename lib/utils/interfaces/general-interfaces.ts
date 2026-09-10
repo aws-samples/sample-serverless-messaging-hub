@@ -108,6 +108,20 @@ export interface EnvironmentVariables {
         dynamodb: {
             messagingTemplates: string;
             idempotency: string;
+            /**
+             * Witness Region for the idempotency table's MRSC global table. Only used in
+             * multi-region (`secondaryRegion` set); when present the table is created with
+             * Multi-Region Strong Consistency, which is what makes the dedup conditional
+             * write authoritative across Regions.
+             *
+             * Constraints (enforced by CDK at synth): an MRSC table needs exactly three
+             * Regions — here 2 replicas + 1 witness — and all three must belong to the same
+             * Region set (US: us-east-1, us-east-2, us-west-2 / EU / AP).
+             *
+             * Leave unset to keep the table eventually consistent (MREC). Doing so
+             * re-opens the duplicate-send window documented in docs/idempotency-and-audit.md.
+             */
+            idempotencyWitnessRegion?: string;
         };
     };
     eventBus: {

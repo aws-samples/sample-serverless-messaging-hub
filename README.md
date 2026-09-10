@@ -15,7 +15,7 @@ EventBridge (central bus)
     └── Rule "sms"   → SQS (+ DLQ) → Lambda SendSMS  → SNS
                                           ↑
               DynamoDB templates (metadata: subject, source, templatePath)
-              DynamoDB idempotency (dedup guard, TTL)
+              DynamoDB idempotency (dedup guard; MRSC in multi-region)
               S3 (HTML templates, rendered with Handlebars)
 
 Audit: Lambda ──acceptance──→ Firehose → S3 (Parquet, Glue/Athena)
@@ -48,7 +48,7 @@ dependency order (one deployment per region):
 
 | # | Nested stack | Creates |
 |---|--------------|---------|
-| 1 | `DatabaseNestedStackConstruct` | DynamoDB tables (templates + idempotency; Global Tables in multi-region) |
+| 1 | `DatabaseNestedStackConstruct` | DynamoDB tables (templates + idempotency; Global Tables in multi-region — idempotency uses **MRSC**) |
 | 2 | `BucketsNestedStackConstruct` | S3 bucket (HTML templates, region-scoped name) |
 | 3 | `EventsNestedStackConstruct` | EventBus + rules + SQS/DLQ + the 2 Lambdas |
 | 4 | `AuditNestedStackConstruct` | WORM audit bucket + Firehose + Glue + SES config set |
@@ -77,7 +77,7 @@ Design and governance docs live under [`docs/`](./docs):
 |----------|---------|
 | [`docs/producer-integration.md`](./docs/producer-integration.md) | **Start here to send messages** — Global Endpoint integration, IAM, SigV4A/CRT setup, Python + TypeScript examples, gotchas |
 | [`docs/USER_STORY.md`](./docs/USER_STORY.md) | Epic and user stories — event contract, acceptance criteria (in Spanish) |
-| [`docs/idempotency-and-audit.md`](./docs/idempotency-and-audit.md) | Deduplication (idempotencyKey + TTL) and audit/non-repudiation design (✅ implemented) |
+| [`docs/idempotency-and-audit.md`](./docs/idempotency-and-audit.md) | Deduplication (idempotencyKey, MRSC store, orphaned-lock recovery) and audit/non-repudiation design (✅ implemented) |
 | [`docs/compliance.md`](./docs/compliance.md) | Inventory of technical controls: encryption, PII handling, retention, WORM, resilience — **and the known gaps**. Not a compliance certification |
 | [`docs/cost.md`](./docs/cost.md) | Architecture cost review — multi-region, 1M emails/month (estimates) |
 | [`docs/e2e-evidence.md`](./docs/e2e-evidence.md) | Live end-to-end test evidence (deployed multi-region run) |
@@ -120,6 +120,7 @@ change requires touching code:
 | `organization`, `appName` | Resource naming prefix (rebranding) |
 | `primaryRegion`, `secondaryRegion` | Single vs multi-region (see Multi-region) |
 | `retainData` | RETAIN + deletion protection vs DESTROY on teardown |
+| `databases.dynamodb.*` | Table names, and `idempotencyWitnessRegion` — the witness that puts the idempotency table in **MRSC** (cross-region strong consistency). Multi-region only; **required there**, or duplicate sends return |
 | `audit.*` | WORM on/off + mode, Object Lock window, archive tier + timing, **expiry**, Firehose buffering |
 | `observability.*` | Log retention, log level, event logging, X-Ray tracing on/off |
 | `monitoring.alarmEmail`, `monitoring.alarms.*` | Alarm recipient, thresholds, periods, evaluation periods |
@@ -208,7 +209,7 @@ messaging-hub/
 │   ├── architecture-stack.ts           # Root stack (per region) — orchestrates the nested stacks
 │   ├── global-endpoint-stack.ts        # Top-level stack — EventBridge Global Endpoint (deployed last)
 │   ├── nested/                         # Nested stacks (Database, Buckets, Events, Audit, IAM, Monitoring)
-│   ├── databases/dynamodb.ts           # DynamoDB tables (templates + idempotency; Global Tables when multi-region)
+│   ├── databases/dynamodb.ts           # DynamoDB tables (templates MREC + idempotency MRSC when multi-region)
 │   ├── buckets/buckets.ts              # S3 bucket (HTML templates, region in name)
 │   ├── event-bridge/
 │   │   ├── buses.ts                    # Custom EventBus
@@ -298,8 +299,12 @@ cdk deploy dev-global-endpoint-<appName>             -c env=dev  # 3) Global End
 > deletion protection) and the audit bucket (RETAIN); `false` (dev) uses DESTROY so failed
 > deploys and teardowns self-clean. This is **independent** from audit immutability.
 
-> **Audit immutability (`audit.worm`):** Object Lock (WORM) is enabled in **production
-> only**, in **COMPLIANCE** mode; dev/qa capture the same audit records without WORM.
+> **Audit immutability (`audit.worm`):** Object Lock (WORM) is enabled in **production only**,
+> in **GOVERNANCE** mode; dev/qa capture the same audit records without WORM. GOVERNANCE is
+> deliberate, not a weaker default: the SES delivery events store the recipient in clear text, so
+> `COMPLIANCE` would make that personal data undeletable for the whole retention window and
+> irreconcilable with an erasure request. Switching is one YAML line (`audit.wormMode`) — see
+> [`docs/compliance.md`](./docs/compliance.md).
 
 > **After the first deploy**, confirm the SNS email subscription from the inbox of
 > `monitoring.alarmEmail` — until confirmed, alarm notifications are not delivered.
@@ -468,8 +473,10 @@ DynamoDB key: partition `product`, sort `filterKey = "<channel>#<feature>#<langu
   attribute.
 
 > **Idempotency, audit & non-repudiation (✅ implemented):** the producer-supplied
-> `idempotencyKey` drives exactly-once delivery (DynamoDB + Powertools Idempotency, TTL
-> per template via the `idempotencyTtlSeconds` template attribute, default 1 day) and a
+> `idempotencyKey` drives exactly-once delivery (DynamoDB + Powertools Idempotency, dedup
+> window per template via the `idempotencyTtlSeconds` template attribute, default 1 day; the
+> multi-region store is an **MRSC** global table, which is what makes the guard hold when both
+> regions process the same event) and a
 > durable audit trail — synchronous SES/SNS acceptance (`providerMessageId`, recipient
 > hashed; stored as **Parquet** via native Firehose conversion) plus asynchronous SES
 > delivery/bounce/complaint events (kept as raw **JSON** for a complete forensic record)
@@ -636,8 +643,18 @@ Failover also takes several minutes to trigger, so producers need retries with b
 avoid losing events in that window. Full setup, IAM policy and working Python/TypeScript
 examples: [`docs/producer-integration.md`](./docs/producer-integration.md).
 
-Residual risk (documented in `docs/compliance.md`): DynamoDB Global Tables are eventually
-consistent, so a brief duplicate-send window is possible during failover.
+**Replication is left ENABLED on purpose**, so both regions process every event. That is AWS's
+recommendation (it keeps the secondary warm and is *required* for automatic failback), but it
+means the dedup guard is what stands between you and sending twice. On an eventually consistent
+Global Table that guard does not hold: both regions' conditional claims succeed inside the
+replication lag. Measured on this system, **every** message went out twice.
+
+The `idempotency` table therefore runs in **MRSC** (Multi-Region Strong Consistency, 2 replicas
++ a witness from `databases.dynamodb.idempotencyWitnessRegion`), where conditional writes are
+evaluated against the latest version of the item across regions. `messaging-templates` stays
+eventually consistent — it is read-mostly and does not gate side effects. Full rationale,
+trade-offs (MRSC has **no TTL**) and the failback caveat:
+[`docs/idempotency-and-audit.md`](./docs/idempotency-and-audit.md#multi-region-why-the-store-is-mrsc).
 
 Operational notes: SES identities and SNS SMS must be configured **per region**; upload
 HTML templates to each region's bucket.
@@ -747,9 +764,9 @@ What `cdk destroy` removes depends on `retainData` for that environment:
 | S3 template bucket | DESTROY + `autoDeleteObjects` (always) | DESTROY + `autoDeleteObjects` (always) |
 
 The template bucket uses `autoDeleteObjects` unconditionally, so it is removed cleanly even
-with versioned objects. In **prod** the audit bucket has Object Lock in COMPLIANCE mode:
-objects cannot be deleted until their retention expires, not even by root — so a prod
-teardown leaves the audit bucket behind by design.
+with versioned objects. In **prod** the audit bucket has Object Lock (GOVERNANCE): objects
+cannot be deleted until their retention expires without `s3:BypassGovernanceRetention` — so a
+prod teardown leaves the audit bucket behind by design.
 
 In multi-region, destroy in reverse order: Global Endpoint stack → secondary → primary.
 Afterwards, verify no orphan resources remain in CloudWatch Logs, S3, and DynamoDB.

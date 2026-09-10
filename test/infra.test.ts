@@ -50,7 +50,7 @@ describe('DynamoDb construct (TableV2 / Global Tables)', () => {
         template.hasResource('AWS::DynamoDB::GlobalTable', { DeletionPolicy: 'Retain' });
     });
 
-    it('creates the idempotency global table with TTL on "expiration"', () => {
+    it('creates the idempotency table as MRSC with a witness in multi-region', () => {
         const stack = new Stack(newApp(), 'DbStack2', { env: ENV });
         new DynamoDb(stack, 'Db', { ...loadEnv(), retainData: true }, PREFIX, 'primary');
         const template = Template.fromStack(stack);
@@ -59,8 +59,47 @@ describe('DynamoDb construct (TableV2 / Global Tables)', () => {
             TableName: `${PREFIX}-idempotency`,
             BillingMode: 'PAY_PER_REQUEST',
             KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
-            TimeToLiveSpecification: { AttributeName: 'expiration', Enabled: true },
+            // Strong consistency is what makes the dedup conditional write authoritative
+            // across regions; without it both regions claim the key and send twice.
+            MultiRegionConsistency: 'STRONG',
+            GlobalTableWitnesses: [{ Region: 'us-east-2' }],
         });
+    });
+
+    it('omits TTL on the MRSC idempotency table (MRSC does not support TTL)', () => {
+        const stack = new Stack(newApp(), 'DbStack2Ttl', { env: ENV });
+        new DynamoDb(stack, 'Db', { ...loadEnv(), retainData: true }, PREFIX, 'primary');
+        const template = Template.fromStack(stack);
+
+        const idempotency = Object.values(
+            template.findResources('AWS::DynamoDB::GlobalTable'),
+        ).find((t) => t.Properties?.TableName === `${PREFIX}-idempotency`);
+
+        expect(idempotency).toBeDefined();
+        expect(idempotency?.Properties?.TimeToLiveSpecification).toBeUndefined();
+    });
+
+    it('keeps TTL and skips MRSC when single-region (no cross-region race)', () => {
+        const stack = new Stack(newApp(), 'DbStack2Single', { env: ENV });
+        new DynamoDb(
+            stack,
+            'Db',
+            { ...loadEnv(), retainData: true, secondaryRegion: '' },
+            PREFIX,
+            'primary',
+        );
+        const template = Template.fromStack(stack);
+
+        const idempotency = Object.values(
+            template.findResources('AWS::DynamoDB::GlobalTable'),
+        ).find((t) => t.Properties?.TableName === `${PREFIX}-idempotency`);
+
+        expect(idempotency?.Properties?.TimeToLiveSpecification).toEqual({
+            AttributeName: 'expiration',
+            Enabled: true,
+        });
+        expect(idempotency?.Properties?.MultiRegionConsistency).toBeUndefined();
+        expect(idempotency?.Properties?.GlobalTableWitnesses).toBeUndefined();
     });
 
     it('replicates to the secondary region when configured', () => {

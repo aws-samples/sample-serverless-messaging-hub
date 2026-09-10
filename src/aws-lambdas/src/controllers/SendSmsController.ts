@@ -20,7 +20,7 @@ const sendSmsLambda = async (event: SQSEvent, context: Context): Promise<void> =
     tracer.putAnnotation('awsRequestId', context.awsRequestId);
 
     Validator.validateSQSPayload(event, createRequestPayload(CHANNEL_TYPES.SMS));
-    await SendSmsService.send(event);
+    await SendSmsService.send(event, context);
 };
 
 export const handler = middy(sendSmsLambda)

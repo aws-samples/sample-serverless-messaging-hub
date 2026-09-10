@@ -107,7 +107,7 @@ of the provider payload, which is the evidence the trail exists to preserve.
 | S3 templates at rest | SSE-S3 (`S3_MANAGED`) + `BLOCK_ALL` public + versioning | ✅ |
 | DynamoDB at rest | AWS-owned key (`TableEncryption.DEFAULT`) | ✅ |
 | Lambda ↔ AWS APIs | TLS (SDK default) | ✅ |
-| S3 audit at rest | SSE-S3 + **Object Lock (WORM, COMPLIANCE) — prod only** | ✅ (prod) |
+| S3 audit at rest | SSE-S3 + **Object Lock (WORM, GOVERNANCE) — prod only** | ✅ (prod) |
 
 Decision: **SSE-SQS** on the PII-bearing queues as the best security/cost balance.
 Migrate to **KMS-CMK** only if a compliance regime requires a customer-managed key with
@@ -144,9 +144,17 @@ policies.
 - **Explicit, required** `idempotencyKey` in the event contract (producer-generated;
   charset `[A-Za-z0-9_-]`, max 256). ✅
 - Deduplication with **DynamoDB + Powertools Idempotency**, `INPROGRESS`→`COMPLETED` flow,
-  **per-template TTL (default 1 day)**. ✅
-- Multi-region via **Global Table**; small residual duplicate window possible during
-  failover due to eventual consistency (documented). ✅
+  **per-template dedup window (default 1 day)**. ✅
+- Orphaned-lock recovery via `in_progress_expiry` (requires `registerLambdaContext`, which the
+  guard passes explicitly because it wraps an isolated operation, not the handler). ✅
+- Multi-region via a **Global Table with Multi-Region Strong Consistency (MRSC)**, so the dedup
+  conditional write is evaluated against the latest version of the item across Regions. ✅
+- ⚠️ **History:** on an eventually consistent (MREC) global table this guard did **not** hold.
+  With global-endpoint replication enabled both Regions process every event, both claims
+  succeeded inside the replication lag, and **every** message was sent twice (measured 4/4).
+  MRSC closes it. Reverting `idempotencyWitnessRegion` re-opens it.
+- Residual: MRSC adds a **failback window** in which a recovering Region cannot write until it
+  catches up. Not a duplicate risk — a delayed-send/DLQ-noise risk. ⚠️
 
 Detail: [`idempotency-and-audit.md`](./idempotency-and-audit.md).
 
@@ -163,8 +171,9 @@ Evidence that a message was **accepted** and **delivered**:
 - **Immutable store:** S3 audit bucket; **acceptance in Parquet** (native Firehose
   conversion, columnar) and **SES events in raw JSON** (kept complete for non-repudiation);
   queried with **Athena**; recipient **hashed**. **Object Lock (WORM) is enabled in
-  production only, in COMPLIANCE mode** (not even root can delete during the retention
-  period); dev/qa capture the same records but the bucket is **not** immutable
+  production only, in GOVERNANCE mode** (immutable against accidents and ordinary operators,
+  while a `s3:BypassGovernanceRetention` holder retains a break-glass path — see the rationale
+  above); dev/qa capture the same records but the bucket is **not** immutable
   (mutable/deletable) — WORM and data-retention are decoupled config axes (`audit.worm`
   vs `retainData`). ✅ (prod immutability)
 - **Per-region archiving** at send time (not from Global Table streams, to avoid double
@@ -185,7 +194,7 @@ single acceptance-to-outcome report per message. See the worked query in
 
 | Data | Retention | Mechanism | Status |
 |------|-----------|-----------|--------|
-| Idempotency records | Dedup window (default 1 day, per template) | DynamoDB **TTL** (free automatic deletion) | ✅ |
+| Idempotency records | Dedup window (default 1 day, per template) — enforced by the **conditional write**, not by TTL | Single-region: DynamoDB **TTL**. Multi-region (**MRSC**): TTL unsupported, records are **never deleted** (storage grows; correctness unaffected) | ⚠️ |
 | Audit (non-repudiation) | Archive at `glacierTransitionDays`, delete at `expirationDays` (prod: 90 / 730 days) | **S3 lifecycle** + optional Object Lock | ✅ |
 | Lambda logs | 3 months (`observability.logRetentionDays`) | CloudWatch Logs retention on a **managed** log group per function | ✅ |
 | DLQ messages | 14 days | SQS retention | ✅ |

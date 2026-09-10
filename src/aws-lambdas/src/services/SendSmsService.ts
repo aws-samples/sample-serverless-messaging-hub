@@ -1,6 +1,6 @@
 import { Logger } from '@aws-lambda-powertools/logger';
 import { Tracer } from '@aws-lambda-powertools/tracer';
-import { SQSEvent } from 'aws-lambda';
+import { Context, SQSEvent } from 'aws-lambda';
 import { generateSMSMessage, DetailParams } from '../libs/functions/UtilsFunctions';
 import { getConfigurationItem } from '../libs/functions/DynamoDbOperations';
 import { runOnce, resolveIdempotencyTtlSeconds } from '../libs/functions/Idempotency';
@@ -22,7 +22,7 @@ const tracer = new Tracer({ serviceName });
  */
 export class SendSmsService {
     @tracer.captureMethod()
-    static async send(event: SQSEvent): Promise<void> {
+    static async send(event: SQSEvent, context: Context): Promise<void> {
         tracer.annotateColdStart();
         tracer.addServiceNameAnnotation();
 
@@ -33,7 +33,7 @@ export class SendSmsService {
         const configuration = await getConfigurationItem({ product, channel, feature, language });
         const ttlSeconds = resolveIdempotencyTtlSeconds(configuration);
 
-        await runOnce(idempotencyKey, ttlSeconds, async () => {
+        await runOnce(idempotencyKey, ttlSeconds, context, async () => {
             const input = generateSMSMessage(detail, configuration as Record<string, string>);
             const result = await snsClient.send(new PublishCommand(input));
             logger.info('SMS sent successfully', {

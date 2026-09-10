@@ -17,6 +17,12 @@ databases:
   dynamodb:
     messagingTemplates: "messaging-templates"
     idempotency: "idempotency"
+    # Witness for the idempotency MRSC global table (multi-region only). Gives the dedup
+    # conditional write cross-region strong consistency. Must be in the same Region set as
+    # primaryRegion/secondaryRegion — US set is us-east-1, us-east-2, us-west-2.
+    # NOTE: MRSC does not support TTL, so idempotency records are never physically deleted
+    # (the dedup window is still enforced by the conditional write). See docs/idempotency-and-audit.md.
+    idempotencyWitnessRegion: "us-east-2"
 eventBus:
   rules:
     messages:
